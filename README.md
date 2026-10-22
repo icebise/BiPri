@@ -1,4 +1,7 @@
-# BiPri Launcher
+<div align="center">
+  <img src="BiPri.png" alt="BiPri Launcher Logo" width="150"/>
+  <h1>BiPri Launcher</h1>
+</div>
 
 **Caution**
 
@@ -35,7 +38,9 @@ These have debug information in the binaries, so their file sizes are relatively
 
 ## Community & Support
 
-Feel free to create a [GitHub issue](https://github.com/icebise/BiPri/issues) if you find a bug or want to suggest a new feature.
+Feel free to create a [GitHub issue](https://github.com/icebise/BiPri/issues) if you find a bug or want to suggest a new feature. 
+
+Join our Discord server for community support and updates: [BiPri Launcher Discord](https://discord.gg/bhN7CaxNdc).
 
 ## Building
 
