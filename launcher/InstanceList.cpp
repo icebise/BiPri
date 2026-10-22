@@ -561,6 +561,9 @@ void InstanceList::updateTotalPlayTime()
 {
     totalPlayTime = 0;
     for (const auto& itr : m_instances) {
+        if (itr->currentStatus() == BaseInstance::Status::Gone) {
+            continue;
+        }
         totalPlayTime += itr->totalTimePlayed();
     }
 }

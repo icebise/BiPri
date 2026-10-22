@@ -46,6 +46,9 @@
 #include <QProcess>
 #include <QTimer>
 
+#include "ui/dialogs/skins/draw/SkinOpenGLWindow.h"
+#include "minecraft/skins/SkinList.h"
+
 #include "BaseInstance.h"
 #include "minecraft/auth/MinecraftAccount.h"
 
@@ -231,6 +234,8 @@ class MainWindow : public QMainWindow {
 
     void runModalTask(Task* task);
     void instanceFromInstanceTask(InstanceTask* task);
+    void updateSkin3DFromList();
+    void updateSkinFromList();
 
    private:
     Ui::MainWindow* ui;
@@ -244,6 +249,14 @@ class MainWindow : public QMainWindow {
     LabeledToolButton* renameButton = nullptr;
     QToolButton* helpMenuButton = nullptr;
     KonamiCode* secretEventFilter = nullptr;
+    SkinList* m_skinList = nullptr;
+    SkinOpenGLWindow* m_skin3DWindow = nullptr;
+    QVBoxLayout* skinSidebarLayoutPtr = nullptr;
+    QVBoxLayout* m_skinSidebarLayout = nullptr;
+    QWidget* m_skinContainerWidget = nullptr;
+    QString m_selectedSkinPath;
+    QTimer* m_skinRefreshTimer = nullptr;
+
 
     std::shared_ptr<Setting> instanceToolbarSetting = nullptr;
 

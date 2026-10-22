@@ -45,6 +45,13 @@
 #include "MainWindow.h"
 #include "ui_MainWindow.h"
 
+#include "minecraft/skins/SkinModel.h"
+#include "ui/dialogs/skins/SkinManageDialog.h"
+#include "minecraft/skins/SkinList.h"
+#include "minecraft/skins/SkinUpload.h"
+#include "net/NetJob.h"
+#include "ui/dialogs/ProgressDialog.h"
+
 #include <QDir>
 #include <QFileInfo>
 #include <QUrl>
@@ -283,7 +290,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui(new Ui::MainWi
         newsLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
         newsLabel->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
         newsLabel->setFocusPolicy(Qt::NoFocus);
-        ui->newsToolBar->insertWidget(ui->actionMoreNews, newsLabel);
+        ui->newsToolBar->setVisible(false);
+        //ui->newsToolBar->insertWidget(ui->actionMoreNews, newsLabel);
 
         connect(newsLabel, &QAbstractButton::clicked, this, &MainWindow::newsButtonClicked);
         connect(m_newsChecker.get(), &NewsChecker::newsLoaded, this, &MainWindow::updateNewsLabel);
@@ -333,6 +341,212 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui(new Ui::MainWi
         view->setSourceOfGroupCollapseStatus(
             [](const QString& groupName) -> bool { return APPLICATION->instances()->isGroupCollapsed(groupName); });
         connect(view, &InstanceView::groupStateChanged, APPLICATION->instances(), &InstanceList::on_GroupStateChanged);
+        // --- ПАНЕЛЬ СКИНОВ СЛЕВА ОТ СПИСКА ИНСТАНСОВ ---
+        // Создаем контейнер для нашей новой панели
+        auto* skinSidebar = new QWidget(ui->centralWidget);
+        skinSidebar->setFixedWidth(180); // Фиксированная ширина, чтобы не растягивалась
+        auto* skinSidebarLayout = new QVBoxLayout(skinSidebar);
+        skinSidebarLayout->setContentsMargins(0, 0, 10, 0); // Отступы
+        skinSidebarLayout->setSpacing(15);
+
+        // 1. Заголовок
+        auto* skinTitle = new QLabel(tr("Ваш скин"), skinSidebar);
+        skinTitle->setAlignment(Qt::AlignCenter);
+        skinTitle->setStyleSheet("font-weight: bold; font-size: 14px; color: #ddd; margin-top: 10px;");
+        skinSidebarLayout->addWidget(skinTitle);
+
+        if (auto account = APPLICATION->accounts()->defaultAccount()) {
+            m_skinList = new SkinList(this, APPLICATION->settings()->get("SkinsDir").toString(), account);
+
+            // --- НАСТРОЙКА ТАЙМЕРА ДЛЯ ОБНОВЛЕНИЯ СКИНА ---
+            m_skinRefreshTimer = new QTimer(this);
+            m_skinRefreshTimer->setSingleShot(true);
+            m_skinRefreshTimer->setInterval(100); // Склеивает пачку сигналов в один вызов
+            connect(m_skinRefreshTimer, &QTimer::timeout, this, &MainWindow::updateSkin3DFromList);
+
+            // Подписываемся на изменения в модели скинов (только на таймер!)
+            auto kick = [this] { if (m_skinRefreshTimer) m_skinRefreshTimer->start(); };
+            connect(m_skinList, &QAbstractItemModel::modelReset, this, kick);
+            connect(m_skinList, &QAbstractItemModel::dataChanged, this, kick);
+            connect(m_skinList, &QAbstractItemModel::rowsInserted, this, kick);
+            connect(m_skinList, &QAbstractItemModel::rowsRemoved, this, kick);
+            // ----------------------------------------------
+        }
+        // 2. 3D Превью скина
+        m_skin3DWindow = new SkinOpenGLWindow(nullptr, QColor(43, 43, 43));
+
+        // Создаем ОДИН контейнер и сохраняем его в переменную класса
+        m_skinContainerWidget = QWidget::createWindowContainer(m_skin3DWindow, skinSidebar);
+        m_skinContainerWidget->setFixedSize(160, 200);
+        m_skinContainerWidget->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+
+        skinSidebarLayout->addWidget(m_skinContainerWidget, 0, Qt::AlignHCenter);
+        m_skinSidebarLayout = skinSidebarLayout; // Сохраняем layout
+
+        // 3. Кнопка скинов
+        auto* skinButton = new QToolButton(skinSidebar);
+        skinButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+        skinButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        skinButton->setStyleSheet("QToolButton { padding: 8px; font-weight: bold; background-color: #3a3a3a; border-radius: 4px; } QToolButton:hover { background-color: #4a4a4a; }");
+
+        // --- НОВАЯ ЛОГИКА ---
+        skinButton->setText(tr("Настроить скин")); // Меняем текст на более подходящий
+        connect(skinButton, &QToolButton::clicked, this, [this]() {
+            auto account = APPLICATION->accounts()->defaultAccount();
+            if (account && account->accountType() == AccountType::Ely) {
+                // Если аккаунт Ely.by — открываем сайт
+                DesktopServices::openUrl(QUrl("https://ely.by/skins/stored?"));
+            } else if (account && account->accountType() == AccountType::MSA) {
+                // Если Microsoft — открываем стандартный диалог
+                on_actionManageSkins_triggered();
+            } else {
+                // Если офлайн — показываем ошибку или ничего не делаем
+                QMessageBox::warning(this, tr("Ошибка"), tr("Сначала выберите аккаунт."));
+            }
+        });// Берем то же действие
+        skinButton->setToolButtonStyle(Qt::ToolButtonTextOnly); // Только текст
+        skinButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        skinButton->setStyleSheet("QToolButton { padding: 8px; font-weight: bold; background-color: #3a3a3a; border-radius: 4px; } QToolButton:hover { background-color: #4a4a4a; }");
+        skinSidebarLayout->addWidget(skinButton);
+
+        // Добавляем "пружину", чтобы всё прижалось к верху
+        skinSidebarLayout->addStretch();
+
+        // Добавляем нашу панель в горизонтальный слой ПЕРЕД списком инстансов
+        ui->horizontalLayout->addWidget(skinSidebar);
+
+        // ------------------------------------------------
+                // 4. Сетка недавних скинов (3 в ряд, 2 в высоту)
+        auto* recentSkinsGrid = new QGridLayout();
+        recentSkinsGrid->setSpacing(4);
+        auto currentAccount = APPLICATION->accounts()->defaultAccount();
+
+        // СНАЧАЛА создаем кнопку "Применить", чтобы она была доступна в лямбдах
+        auto* applySkinBtn = new QPushButton(tr("Применить"), skinSidebar);
+        applySkinBtn->setStyleSheet("QPushButton { padding: 8px; font-weight: bold; background-color: #4CAF50; color: white; border-radius: 4px; } "
+                                    "QPushButton:hover { background-color: #45a049; } "
+                                    "QPushButton:disabled { background-color: #555; color: #888; }");
+        applySkinBtn->setEnabled(false); // Изначально неактивна
+
+        int addedSkins = 0;
+        if (m_skinList) {
+            for (int i = 0; i < m_skinList->rowCount() && addedSkins < 6; ++i) {
+                QModelIndex index = m_skinList->index(i, 0);
+                QString key = index.data(Qt::UserRole).toString();
+
+                if (auto* skin = m_skinList->skin(key)) {
+                    if (skin->isValid()) {
+                        auto* skinBtn = new QToolButton(skinSidebar);
+                        skinBtn->setFixedSize(48, 48);
+                        skinBtn->setIconSize(QSize(40, 40));
+                        skinBtn->setStyleSheet("QToolButton { border: 1px solid #555; border-radius: 4px; background-color: #2b2b2b; } QToolButton:hover { border: 1px solid #aaa; }");
+
+                        QImage faceImage = skin->getPreview().copy(4, 2, 8, 8)
+                                               .scaled(80, 80, Qt::IgnoreAspectRatio, Qt::FastTransformation);
+                        skinBtn->setIcon(QIcon(QPixmap::fromImage(faceImage)));
+
+                        // При нажатии обновляем 3D-модель и запоминаем скин
+                        const QString skinKey = key;  // key из index.data(Qt::UserRole)
+                        connect(skinBtn, &QToolButton::clicked, this, [this, skinKey, applySkinBtn]() {
+                            if (!m_skinList) return;
+                            auto* skin = m_skinList->skin(skinKey);   // свежий указатель
+                            if (!skin || !skin->isValid()) return;    // скин мог исчезнуть
+                            if (m_skin3DWindow) m_skin3DWindow->updateScene(skin);
+                            m_selectedSkinPath = skin->getPath();
+                            applySkinBtn->setEnabled(true);
+                        });
+
+
+                        recentSkinsGrid->addWidget(skinBtn, addedSkins / 3, addedSkins % 3);
+                        addedSkins++;
+                    }
+                }
+            }
+        }
+        skinSidebarLayout->addWidget(applySkinBtn);
+
+        // Обработчик нажатия на кнопку "Применить"
+        connect(applySkinBtn, &QPushButton::clicked, this, [this, applySkinBtn]() {
+            auto acc = APPLICATION->accounts()->defaultAccount();
+
+            if (acc && acc->accountType() == AccountType::Ely) {
+                // Для Ely.by открываем сайт
+                DesktopServices::openUrl(QUrl("https://ely.by/skins/stored?sort=best"));
+                return;
+            }
+
+            if (!acc || acc->accountType() != AccountType::MSA) {
+                QMessageBox::warning(this, tr("Ошибка"), tr("Необходим лицензионный аккаунт Microsoft."));
+                return;
+            }
+
+            if (m_selectedSkinPath.isEmpty()) return;
+            auto path = m_selectedSkinPath;
+
+            if (!QFile::exists(path)) {
+                QMessageBox::warning(this, tr("Ошибка"), tr("Файл скина не найден!"));
+                return;
+            }
+
+            applySkinBtn->setEnabled(false);
+            applySkinBtn->setText(tr("Загрузка..."));
+
+            NetJob::Ptr skinUpload{ new NetJob(tr("Change skin"), APPLICATION->network(), 1) };
+            if (m_selectedSkinPath.isEmpty()) return;
+
+           // Ищем модель скина по пути, чтобы получить его ModelString (CLASSIC или SLIM)
+           QString modelString = "classic"; // По умолчанию
+           for (int i = 0; i < m_skinList->rowCount(); ++i) {
+               QModelIndex idx = m_skinList->index(i, 0);
+               QString key = idx.data(Qt::UserRole).toString();
+               if (auto* s = m_skinList->skin(key)) {
+                   if (s->getPath() == m_selectedSkinPath) {
+                       modelString = s->getModelString();
+                       break;
+                   }
+               }
+           }
+
+            skinUpload->addNetAction(SkinUpload::make(acc->accessToken(), path, modelString));
+            skinUpload->addTask(acc->refresh().staticCast<Task>());
+
+            ProgressDialog prog(this);
+            if (prog.execWithTask(skinUpload.get()) != QDialog::Accepted) {
+                QMessageBox::warning(this, tr("Ошибка"), tr("Не удалось сменить скин!"));
+                applySkinBtn->setEnabled(true);
+                applySkinBtn->setText(tr("Применить"));
+            } else {
+                QMessageBox::information(this, tr("Успех"), tr("Скин успешно изменен!"));
+
+                // Обновляем URL и модель скина в SkinList, чтобы он не скачивал копию
+                if (m_skinList) {
+                    // Находим наш скин в списке по пути
+                    for (int i = 0; i < m_skinList->rowCount(); ++i) {
+                        QModelIndex idx = m_skinList->index(i, 0);
+                        QString key = idx.data(Qt::UserRole).toString();
+                        if (auto* s = m_skinList->skin(key)) {
+                            if (s->getPath() == m_selectedSkinPath) {
+                                // Обновляем URL, который вернул Mojang
+                                s->setURL(acc->accountData()->minecraftProfile.skin.url);
+                                // Обновляем модель (чтобы сохранилось в кэше)
+                                m_skinList->updateSkin(s);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                m_selectedSkinPath.clear();
+                applySkinBtn->setText(tr("Применить"));
+            }
+        });
+
+        // Добавляем сетку в левую панель (до кнопки добавления растяжения)
+        skinSidebarLayout->addLayout(recentSkinsGrid);
+
+        skinSidebarLayout->addStretch(); // Прижимаем всё к верху
+
+
         ui->horizontalLayout->addWidget(view);
     }
     // The cat background
@@ -758,7 +972,44 @@ void MainWindow::defaultAccountChanged()
 
     MinecraftAccountPtr account = APPLICATION->accounts()->defaultAccount();
 
-    // FIXME: this needs adjustment for MSA
+    // 1. ПЕРЕСОЗДАЕМ СПИСОК СКИНОВ (один раз!)
+    if (m_skinList) {
+        delete m_skinList;
+        m_skinList = nullptr;
+    }
+    if (account) {
+        m_skinList = new SkinList(this, APPLICATION->settings()->get("SkinsDir").toString(), account);
+
+        // Подписываемся на сигналы через таймер (как в конструкторе)
+        if (m_skinRefreshTimer) {
+            auto kick = [this] { m_skinRefreshTimer->start(); };
+            connect(m_skinList, &QAbstractItemModel::modelReset, this, kick);
+            connect(m_skinList, &QAbstractItemModel::dataChanged, this, kick);
+            connect(m_skinList, &QAbstractItemModel::rowsInserted, this, kick);
+            connect(m_skinList, &QAbstractItemModel::rowsRemoved, this, kick);
+        }
+    }
+
+    // 2. ОБНОВЛЕНИЕ 3D СКИНА (для MSA и Ely)
+    if (m_skin3DWindow && m_skinList) {
+        if (account && (account->accountType() == AccountType::MSA || account->accountType() == AccountType::Ely)) {
+            int skinIndex = m_skinList->getSelectedAccountSkin();
+            QModelIndex modelIndex = m_skinList->index(skinIndex);
+            if (modelIndex.isValid()) {
+                QString key = modelIndex.data(Qt::UserRole).toString();
+                if (auto* skin = m_skinList->skin(key)) {
+                    if (skin->isValid()) {
+                        m_skin3DWindow->updateScene(skin);
+                    }
+                }
+            }
+        } else {
+            // Для офлайн-аккаунтов очищаем
+            m_skin3DWindow->updateScene(nullptr);
+        }
+    }
+
+    // 3. ОБНОВЛЕНИЕ КНОПОК АККАУНТА
     if (account && account->profileName() != "") {
         auto profileLabel = profileInUseFilter(account->displayName(), account->isInUse());
         ui->actionAccountsButton->setText(profileLabel);
@@ -815,9 +1066,9 @@ void MainWindow::updateNewsLabel()
     } else {
         QList<NewsEntryPtr> entries = m_newsChecker->getNewsEntries();
         if (entries.length() > 0) {
-            newsLabel->setText(entries[0]->title);
-            newsLabel->setEnabled(true);
-            ui->actionMoreNews->setVisible(true);
+            newsLabel->setText(tr("No news"));
+            newsLabel->setEnabled(false);
+            ui->actionMoreNews->setVisible(false);
         } else {
             newsLabel->setText(tr("No news available."));
             newsLabel->setEnabled(false);
@@ -1404,6 +1655,11 @@ void MainWindow::on_actionManageSkins_triggered()
     if (account && (account->accountType() == AccountType::MSA) && !account->isActive()) {
         SkinManageDialog dialog(this, account);
         dialog.exec();
+
+        // Вместо пересоздания окна, просто просим таймер обновить скин
+        if (m_skinRefreshTimer) {
+            m_skinRefreshTimer->start();
+        }
     }
 }
 
@@ -1518,6 +1774,14 @@ void MainWindow::on_actionDeleteInstance_triggered()
 
     if (!checkLinkedInstances(id, this, tr("Deleting")))
         return;
+
+    // --- СОХРАНЯЕМ ВРЕМЯ УДАЛЯЕМОЙ СБОРКИ В ГЛОБАЛЬНОЕ ХРАНИЛИЩЕ ---
+    qint64 timeToSave = m_selectedInstance->totalTimePlayed();
+    if (timeToSave > 0) {
+        qint64 currentGlobal = APPLICATION->settings()->get("GlobalPlayTime").toLongLong();
+        APPLICATION->settings()->set("GlobalPlayTime", currentGlobal + timeToSave);
+    }
+    // -------------------------------------------------------------
 
     if (APPLICATION->instances()->trashInstance(id)) {
         ui->actionUndoTrashInstance->setEnabled(APPLICATION->instances()->trashedSomething());
@@ -1762,7 +2026,7 @@ void MainWindow::updateStatusCenter()
 {
     m_statusCenter->setVisible(APPLICATION->settings()->get("ShowGlobalGameTime").toBool());
 
-    int timePlayed = APPLICATION->instances()->getTotalPlayTime();
+    int timePlayed = APPLICATION->instances()->getTotalPlayTime() + APPLICATION->settings()->get("GlobalPlayTime").toInt();
     if (timePlayed > 0) {
         m_statusCenter->setText(
             tr("Total playtime: %1")
@@ -1786,4 +2050,51 @@ void MainWindow::refreshCurrentInstance()
 {
     auto current = view->selectionModel()->currentIndex();
     instanceChanged(current, current);
+}
+void MainWindow::updateSkin3DFromList()
+{
+    if (!m_skinList || !m_skin3DWindow) return;
+
+    QModelIndex mi = m_skinList->index(m_skinList->getSelectedAccountSkin());
+    if (!mi.isValid()) return;
+
+    auto* skin = m_skinList->skin(mi.data(Qt::UserRole).toString());
+
+    // Если скин не готов (нет текстуры), просто ждем следующего сигнала
+    if (!skin || !skin->isValid()) return;
+
+    // Если у SkinModel нет метода getTexture(), используйте getPreview()
+    // Главное - проверить, что картинка не пустая
+    if (skin->getPreview().isNull()) return;
+
+    // Обновляем сцену
+    m_skin3DWindow->updateScene(skin);
+}
+void MainWindow::updateSkinFromList()
+{
+    if (!m_skin3DWindow || !m_skinList) return;
+
+    auto account = APPLICATION->accounts()->defaultAccount();
+    if (!account) {
+        m_skin3DWindow->updateScene(nullptr);
+        return;
+    }
+
+    // Для Ely.by и MSA пытаемся получить скин из списка
+    if (account->accountType() == AccountType::MSA || account->accountType() == AccountType::Ely) {
+        int skinIndex = m_skinList->getSelectedAccountSkin();
+        QModelIndex modelIndex = m_skinList->index(skinIndex);
+        if (modelIndex.isValid()) {
+            QString key = modelIndex.data(Qt::UserRole).toString();
+            if (auto* skin = m_skinList->skin(key)) {
+                if (skin->isValid()) {
+                    m_skin3DWindow->updateScene(skin);
+                    return;
+                }
+            }
+        }
+    }
+
+    // Если скин не найден (или аккаунт офлайн) — очищаем
+    m_skin3DWindow->updateScene(nullptr);
 }
