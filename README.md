@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="BiPri.png" alt="BiPri Launcher Logo" width="150"/>
+  <img src="program_info/BiPri.png" alt="BiPri Launcher Logo" width="150"/>
   <h1>BiPri Launcher</h1>
 </div>
 
